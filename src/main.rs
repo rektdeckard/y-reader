@@ -5,7 +5,7 @@
 // When compiling natively:
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
-    let app = eframe_template::TemplateApp::default();
+    let app = y_reader::YReader::default();
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(Box::new(app), native_options);
 }
