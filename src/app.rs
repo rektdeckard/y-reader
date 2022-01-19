@@ -1,15 +1,114 @@
 use eframe::{egui, epi};
+use hacker_news::model::firebase::Comment;
 use hacker_news::{client::json_client::JsonClient, model::firebase::Item, model::firebase::Story};
+use html_escape;
+use lazy_static::lazy_static;
+use regex::Regex;
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use time_humanize::HumanTime;
 use url::Url;
 
-const WINDOW: usize = 25;
+const REFETCH_DELAY_SECONDS: u64 = 60;
+const WINDOW: usize = 50;
 
 struct Auth {
-    pub username: String,
-    pub password: String,
+    username: String,
+    password: String,
+}
+
+#[derive(PartialEq)]
+enum Tab {
+    Top,
+    New,
+    Show,
+}
+
+#[derive(Debug)]
+struct Data {
+    top: HashMap<usize, Item>,
+    top_ids: Vec<u32>,
+    top_page: usize,
+    new: HashMap<usize, Item>,
+    new_ids: Vec<u32>,
+    new_page: usize,
+    show: HashMap<usize, Item>,
+    show_ids: Vec<u32>,
+    show_page: usize,
+    comments: HashMap<u32, CommentState>,
+}
+
+impl Data {
+    fn new() -> Self {
+        Self {
+            top: HashMap::new(),
+            top_ids: Vec::new(),
+            top_page: 0,
+            new: HashMap::new(),
+            new_ids: Vec::new(),
+            new_page: 0,
+            show: HashMap::new(),
+            show_ids: Vec::new(),
+            show_page: 0,
+            comments: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum CommentState {
+    Loading,
+    Loaded(LocalComment),
+    Errored,
+}
+
+struct LocalStory {
+    id: hacker_news::model::Id,
+    by: Option<String>,
+    time: u64,
+    kids: Option<Vec<hacker_news::model::Id>>,
+    score: Option<hacker_news::model::Score>,
+    title: Option<String>,
+    url: Option<String>,
+}
+
+impl LocalStory {
+    fn from_lib(story: &Story) -> Self {
+        Self {
+            id: story.id.clone(),
+            by: story.by.clone(),
+            time: story.time,
+            kids: story.kids.clone(),
+            score: story.score.clone(),
+            title: story.title.clone(),
+            url: story.url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LocalComment {
+    id: hacker_news::model::Id,
+    by: Option<String>,
+    time: u64,
+    kids: Option<Vec<hacker_news::model::Id>>,
+    // parent: Option<hacker_news::model::Id>,
+    text: Option<String>,
+}
+
+impl LocalComment {
+    fn from_lib(comment: &Comment) -> Self {
+        Self {
+            id: comment.id.clone(),
+            by: comment.by.clone(),
+            time: comment.time,
+            kids: comment.kids.clone(),
+            // parent: comment.parent.clone(),
+            text: comment.text.clone(),
+        }
+    }
 }
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
@@ -22,105 +121,156 @@ pub struct YReader {
     show_login: bool,
     show_settings: bool,
     #[cfg_attr(feature = "persistence", serde(skip))]
-    client: JsonClient,
     tab: Tab,
-    top: HashMap<usize, Item>,
-    top_ids: Vec<u32>,
-    top_page: usize,
-    new: HashMap<usize, Item>,
-    new_ids: Vec<u32>,
-    new_page: usize,
-    show: HashMap<usize, Item>,
-    show_ids: Vec<u32>,
-    show_page: usize,
+    data: Arc<Mutex<Data>>,
 }
 
 impl YReader {
-    fn fetch_stories(&mut self) {
-        match self.tab {
-            Tab::Top => {
-                let ids = self.client.top_stories();
-                if let Ok(ids) = ids {
-                    for (idx, id) in ids
-                        .iter()
-                        .skip(WINDOW * self.top_page)
-                        .take(WINDOW)
-                        .enumerate()
-                    {
-                        match self.client.item(*id) {
-                            Ok(item) => {
-                                self.top.insert(idx + (WINDOW * self.top_page), item);
-                            }
-                            _ => {}
-                        }
+    // fn fetch_top(&self) {
+    //     let data_top = Arc::clone(&self.data);
+
+    //     thread::spawn(move || {
+    //         let client = JsonClient::new();
+    //         let ids = client.top_stories();
+    //         if let Ok(ids) = ids {
+    //             let page;
+    //             {
+    //                 let data = data_top.lock().unwrap();
+    //                 page = data.top_page;
+    //             }
+    //             for (idx, id) in ids.iter().take(WINDOW * (page + 1)).enumerate() {
+    //                 if let Ok(item) = client.item(*id) {
+    //                     let mut data = data_top.lock().unwrap();
+    //                     data.top.insert(idx, item);
+    //                 }
+    //             }
+    //             let mut data = data_top.lock().unwrap();
+    //             data.top_ids = ids;
+    //             // data.top_page = (data.top_page + 1) % 4;
+    //         }
+    //         println!("Fetched top");
+    //     });
+    // }
+
+    // fn fetch_new(&self) {
+    //     let data_new = Arc::clone(&self.data);
+
+    //     thread::spawn(move || {
+    //         let client = JsonClient::new();
+    //         let ids = client.new_stories();
+    //         if let Ok(ids) = ids {
+    //             let page;
+    //             {
+    //                 let data = data_new.lock().unwrap();
+    //                 page = data.new_page;
+    //             }
+    //             for (idx, id) in ids.iter().take(WINDOW * (page + 1)).enumerate() {
+    //                 if let Ok(item) = client.item(*id) {
+    //                     let mut data = data_new.lock().unwrap();
+    //                     data.new.insert(idx, item);
+    //                 }
+    //             }
+    //             let mut data = data_new.lock().unwrap();
+    //             data.new_ids = ids;
+    //             // data.new_page = (data.new_page + 1) % 4;
+    //         }
+    //         println!("Fetched new");
+    //     });
+    // }
+
+    fn init(&self) {
+        let data_top = Arc::clone(&self.data);
+        thread::spawn(move || loop {
+            let client = JsonClient::new();
+            let ids = client.top_stories();
+            if let Ok(ids) = ids {
+                let page;
+                {
+                    let data = data_top.lock().unwrap();
+                    page = data.top_page;
+                }
+                for (idx, id) in ids.iter().take(WINDOW * (page + 1)).enumerate() {
+                    if let Ok(item) = client.item(*id) {
+                        let mut data = data_top.lock().unwrap();
+                        data.top.insert(idx, item);
                     }
-                    self.top_ids = ids;
-                    self.top_page += 1;
-                };
+                }
+                let mut data = data_top.lock().unwrap();
+                data.top_ids = ids;
+                data.top_page = (data.top_page + 1) % 2;
             }
-            Tab::New => {
-                let ids = self.client.new_stories();
-                if let Ok(ids) = ids {
-                    for (idx, id) in ids
-                        .iter()
-                        .skip(WINDOW * self.new_page)
-                        .take(WINDOW)
-                        .enumerate()
-                    {
-                        match self.client.item(*id) {
-                            Ok(item) => {
-                                self.new.insert(idx + (WINDOW * self.new_page), item);
-                            }
-                            _ => {}
-                        }
+            thread::sleep(Duration::from_secs(REFETCH_DELAY_SECONDS));
+        });
+
+        let data_new = Arc::clone(&self.data);
+        thread::spawn(move || loop {
+            let client = JsonClient::new();
+            let ids = client.new_stories();
+            if let Ok(ids) = ids {
+                let page;
+                {
+                    let data = data_new.lock().unwrap();
+                    page = data.new_page;
+                }
+                for (idx, id) in ids.iter().take(WINDOW * (page + 1)).enumerate() {
+                    if let Ok(item) = client.item(*id) {
+                        let mut data = data_new.lock().unwrap();
+                        data.new.insert(idx, item);
                     }
-                    self.new_ids = ids;
-                    self.new_page += 1;
-                };
+                }
+                let mut data = data_new.lock().unwrap();
+                data.new_ids = ids;
+                data.new_page = (data.new_page + 1) % 2;
             }
-            Tab::Show => {
-                let ids = self.client.show_stories();
-                if let Ok(ids) = ids {
-                    for (idx, id) in ids
-                        .iter()
-                        .skip(WINDOW * self.show_page)
-                        .take(WINDOW)
-                        .enumerate()
-                    {
-                        match self.client.item(*id) {
-                            Ok(item) => {
-                                self.show.insert(idx + (WINDOW * self.show_page), item);
-                            }
-                            _ => {}
-                        }
+            thread::sleep(Duration::from_secs(REFETCH_DELAY_SECONDS));
+        });
+
+        let data_show = Arc::clone(&self.data);
+        thread::spawn(move || loop {
+            let client = JsonClient::new();
+            let ids = client.show_stories();
+            if let Ok(ids) = ids {
+                let page;
+                {
+                    let data = data_show.lock().unwrap();
+                    page = data.show_page;
+                }
+                for (idx, id) in ids.iter().take(WINDOW * (page + 1)).enumerate() {
+                    if let Ok(item) = client.item(*id) {
+                        let mut data = data_show.lock().unwrap();
+                        data.show.insert(idx, item);
                     }
-                    self.show_ids = ids;
-                    self.show_page += 1;
-                };
+                }
+                let mut data = data_show.lock().unwrap();
+                data.show_ids = ids;
+                data.show_page = (data.show_page + 1) % 2;
             }
-        }
+            thread::sleep(Duration::from_secs(REFETCH_DELAY_SECONDS));
+        });
     }
 
     fn render_stories(&mut self, ui: &mut egui::Ui) {
         egui::containers::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                let current = self.data.lock().unwrap();
                 let items = match self.tab {
-                    Tab::Top => &self.top,
-                    Tab::New => &self.new,
-                    Tab::Show => &self.show,
+                    Tab::Top => &current.top,
+                    Tab::New => &current.new,
+                    Tab::Show => &current.show,
                 };
 
-                let mut stories: Vec<(usize, &Story)> = items
+                let mut stories: Vec<(usize, LocalStory)> = items
                     .iter()
                     .filter_map(|(idx, i)| match i {
-                        Item::Story(s) => Some((*idx as usize, s)),
+                        Item::Story(s) => Some((*idx as usize, LocalStory::from_lib(s))),
                         _ => None,
                     })
                     .collect();
                 stories.sort_by(|(a, _), (b, _)| a.cmp(b));
+                std::mem::drop(current);
 
-                stories.iter().for_each(|&(idx, s)| {
+                stories.iter().for_each(|(idx, s)| {
                     if let Some(title) = &s.title {
                         ui.horizontal_wrapped(|ui| {
                             ui.label(egui::RichText::new(title).strong());
@@ -173,25 +323,158 @@ impl YReader {
                         ))
                         .id_source(format!("{}-{}", idx, s.id))
                         .show(ui, |ui| {
-                            ui.label(format!("{:?}", s));
+                            if let Some(kids) = &s.kids {
+                                self.render_comments(ui, kids);
+                            }
                         });
 
                         ui.separator();
                     }
                 });
-                ui.vertical_centered(|ui| {
-                    let (page, count) = match self.tab {
-                        Tab::Top => (self.top_page, self.top_ids.len()),
-                        Tab::New => (self.new_page, self.new_ids.len()),
-                        Tab::Show => (self.show_page, self.show_ids.len()),
-                    };
-                    if count > 0 && WINDOW * page >= count {
-                        ui.label("All done!");
-                    } else if ui.button("Load more").clicked() {
-                        self.fetch_stories();
-                    }
-                });
+
+                // let margin = ui.visuals().clip_rect_margin;
+                // let current_scroll = ui.clip_rect().top() - ui.min_rect().top() + margin;
+                // let max_scroll = ui.min_rect().height() - ui.clip_rect().height() + 2.0 * margin;
+
+                // if current_scroll == max_scroll {
+                //     println!("yuip");
+                //     match self.tab {
+                //         Tab::Top => {
+                //             self.fetch_top();
+                //             // DEADLOCK!
+                //             let mut data = self.data.lock().unwrap();
+                //             data.top_page = (data.top_page + 1) % 4;
+                //         }
+                //         Tab::New => {
+                //             self.fetch_new();
+                //             let mut data = self.data.lock().unwrap();
+                //             data.new_page = (data.new_page + 1) % 4;
+                //         }
+                //         Tab::Show => {}
+                //     };
+                // }
+
+                // ui.vertical_centered(|ui| {
+                //     let (page, count) = match self.tab {
+                //         Tab::Top => (self.top_page, self.top_ids.len()),
+                //         Tab::New => (self.new_page, self.new_ids.len()),
+                //         Tab::Show => (self.show_page, self.show_ids.len()),
+                //     };
+                //     if count > 0 && WINDOW * page >= count {
+                //         ui.label("All done!");
+                //     } else if ui.button("Load more").clicked() {
+                //         self.fetch_stories();
+                //     }
+                // });
             })
+    }
+
+    fn render_comments(&self, ui: &mut egui::Ui, kids: &Vec<u32>) {
+        let data = Arc::clone(&self.data);
+        lazy_static! {
+            static ref RE: Regex =
+                Regex::new(r#"<a\s+href=(?:"([^"]+)"|'([^']+)').*?>(.*?)</a>"#).unwrap();
+        }
+
+        for k in kids {
+            let comment: Option<CommentState>;
+            {
+                let data = data.lock().unwrap();
+                comment = data.comments.get(k).and_then(|c| Some(c.to_owned()));
+            }
+
+            match comment {
+                Some(CommentState::Loading) => {
+                    ui.label("Loading...");
+                }
+                Some(CommentState::Loaded(c)) => {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.5;
+                        if let Some(by) = &c.by {
+                            ui.hyperlink_to(
+                                by,
+                                format!("https://news.ycombinator.com/user?id={}", by),
+                            );
+                        }
+
+                        ui.add(egui::widgets::Separator::default().vertical());
+
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .expect("oops")
+                            .as_secs();
+
+                        ui.label(format!(
+                            "{}",
+                            HumanTime::from_seconds((c.time as i64) - (now as i64))
+                        ));
+                    });
+
+                    let text = c.text.to_owned().unwrap_or_default();
+                    let decoded = html_escape::decode_html_entities(&text).to_string();
+
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.y = 10.;
+                        decoded.split("<p>").into_iter().for_each(|part| {
+                            if RE.is_match(part) {
+                                for piece in RE.captures_iter(part) {
+                                    // TODO: include non-link text from this line
+                                    if let Some(url) = &piece.get(1) {
+                                        if let Some(label) = &piece.get(3) {
+                                            ui.hyperlink_to(label.as_str(), url.as_str());
+                                        } else {
+                                            ui.hyperlink(url.as_str());
+                                        }
+                                    }
+                                }
+                            } else {
+                                ui.label(part);
+                            }
+
+                            ui.end_row();
+                        });
+                    });
+
+                    if let Some(kids) = &c.kids {
+                        egui::containers::CollapsingHeader::new(format!("{} Replies", kids.len()))
+                            .id_source(c.id)
+                            .show(ui, |ui| {
+                                self.render_comments(ui, &kids);
+                            });
+                    }
+                    ui.separator();
+                }
+                Some(CommentState::Errored) => {
+                    ui.label("Errored.");
+                }
+                _ => {
+                    ui.label("Starting load...");
+                    let data = Arc::clone(&self.data);
+                    let id = k.clone();
+
+                    {
+                        let mut data = data.lock().unwrap();
+                        data.comments.insert(id, CommentState::Loading);
+                    }
+
+                    thread::spawn(move || {
+                        let client = JsonClient::new();
+                        let comment = client.item(id);
+
+                        let mut data = data.lock().unwrap();
+                        match comment {
+                            Ok(Item::Comment(c)) => {
+                                data.comments
+                                    .insert(id, CommentState::Loaded(LocalComment::from_lib(&c)));
+                            }
+                            _ => {
+                                data.comments.insert(id, CommentState::Errored);
+                            }
+                        }
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -202,24 +485,15 @@ impl Default for YReader {
             authed: false,
             show_login: false,
             show_settings: false,
-            client: JsonClient::new(),
             tab: Tab::Top,
-            top: HashMap::new(),
-            top_ids: Vec::new(),
-            top_page: 0,
-            new: HashMap::new(),
-            new_ids: Vec::new(),
-            new_page: 0,
-            show: HashMap::new(),
-            show_ids: Vec::new(),
-            show_page: 0,
+            data: Arc::new(Mutex::new(Data::new())),
         }
     }
 }
 
 impl epi::App for YReader {
     fn name(&self) -> &str {
-        "newsY"
+        "Y Reader"
     }
 
     /// Called once before the first frame.
@@ -236,7 +510,7 @@ impl epi::App for YReader {
             *self = epi::get_value(storage, epi::APP_KEY).unwrap_or_default()
         }
 
-        self.fetch_stories();
+        self.init();
     }
 
     /// Called by the frame work to save state before shutdown.
@@ -254,22 +528,13 @@ impl epi::App for YReader {
             authed,
             show_login,
             show_settings,
-            client: _,
             tab,
-            top: _,
-            top_ids: _,
-            top_page: _,
-            new: _,
-            new_ids: _,
-            new_page: _,
-            show: _,
-            show_ids: _,
-            show_page: _,
+            data: _,
         } = self;
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.heading("Hacker News");
+                ui.heading("Y Reader");
 
                 ui.add(egui::widgets::Separator::default().vertical());
                 ui.selectable_value(tab, Tab::Top, "Top");
@@ -351,10 +616,11 @@ impl epi::App for YReader {
 
         egui::TopBottomPanel::bottom("bottom_panel").show(ctx, |ui| {
             ui.centered_and_justified(|ui| {
+                let data = &self.data.lock().unwrap();
                 let count = match self.tab {
-                    Tab::Top => self.top.len(),
-                    Tab::New => self.new.len(),
-                    Tab::Show => self.show.len(),
+                    Tab::Top => data.top.len(),
+                    Tab::New => data.new.len(),
+                    Tab::Show => data.show.len(),
                 };
                 ui.small(format!("{} items", count));
             });
@@ -366,11 +632,4 @@ impl epi::App for YReader {
             self.render_stories(ui);
         });
     }
-}
-
-#[derive(PartialEq)]
-enum Tab {
-    Top,
-    New,
-    Show,
 }
