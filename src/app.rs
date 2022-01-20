@@ -1,3 +1,4 @@
+use eframe::egui::Stroke;
 use eframe::{egui, epi};
 use hacker_news::model::firebase::Comment;
 use hacker_news::{client::json_client::JsonClient, model::firebase::Item, model::firebase::Story};
@@ -533,6 +534,17 @@ impl epi::App for YReader {
         } = self;
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+            lazy_static! {
+                static ref SELECTION_STYLE: egui::style::Selection = egui::style::Selection {
+                    bg_fill: egui::Color32::from_rgb(215, 101, 46),
+                    stroke: Stroke {
+                        width: 1.,
+                        color: egui::Color32::WHITE,
+                    },
+                };
+            }
+            ui.visuals_mut().selection = *SELECTION_STYLE;
+
             ui.horizontal_wrapped(|ui| {
                 ui.heading("Y Reader");
 
@@ -627,6 +639,8 @@ impl epi::App for YReader {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            // ui.visuals_mut().hyperlink_color = egui::Color32::from_rgb(255, 101, 0);
+            ui.visuals_mut().hyperlink_color = egui::Color32::from_rgb(205, 91, 36);
             // The central panel the region left after adding TopPanel's and SidePanel's
             egui::warn_if_debug_build(ui);
             self.render_stories(ui);
