@@ -1,4 +1,3 @@
-use eframe::egui::Stroke;
 use eframe::{egui, epi};
 use hacker_news::model::firebase::Comment;
 use hacker_news::{client::json_client::JsonClient, model::firebase::Item, model::firebase::Story};
@@ -12,9 +11,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use time_humanize::HumanTime;
 use url::Url;
 
+const BASE_URL: &'static str = "https://news.ycombinator.com";
 const REFETCH_DELAY_SECONDS: u64 = 60;
 const WINDOW: usize = 50;
 
+#[cfg_attr(feature = "persistence", derive(serde::Deserialize, serde::Serialize))]
 struct Auth {
     username: String,
     password: String,
@@ -28,6 +29,7 @@ enum Tab {
 }
 
 #[derive(Debug)]
+#[cfg_attr(feature = "persistence", derive(serde::Deserialize, serde::Serialize))]
 struct Data {
     top: HashMap<usize, Item>,
     top_ids: Vec<u32>,
@@ -59,12 +61,14 @@ impl Data {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "persistence", derive(serde::Deserialize, serde::Serialize))]
 enum CommentState {
     Loading,
     Loaded(LocalComment),
     Errored,
 }
 
+#[cfg_attr(feature = "persistence", derive(serde::Deserialize, serde::Serialize))]
 struct LocalStory {
     id: hacker_news::model::Id,
     by: Option<String>,
@@ -90,6 +94,7 @@ impl LocalStory {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "persistence", derive(serde::Deserialize, serde::Serialize))]
 struct LocalComment {
     id: hacker_news::model::Id,
     by: Option<String>,
@@ -116,69 +121,17 @@ impl LocalComment {
 #[cfg_attr(feature = "persistence", derive(serde::Deserialize, serde::Serialize))]
 #[cfg_attr(feature = "persistence", serde(default))] // if we add new fields, give them default values when deserializing old state
 pub struct YReader {
-    // this how you opt-out of serialization of a member
     auth: Option<Auth>,
     authed: bool,
     show_login: bool,
     show_settings: bool,
+    // this how you opt-out of serialization of a member
     #[cfg_attr(feature = "persistence", serde(skip))]
     tab: Tab,
     data: Arc<Mutex<Data>>,
 }
 
 impl YReader {
-    // fn fetch_top(&self) {
-    //     let data_top = Arc::clone(&self.data);
-
-    //     thread::spawn(move || {
-    //         let client = JsonClient::new();
-    //         let ids = client.top_stories();
-    //         if let Ok(ids) = ids {
-    //             let page;
-    //             {
-    //                 let data = data_top.lock().unwrap();
-    //                 page = data.top_page;
-    //             }
-    //             for (idx, id) in ids.iter().take(WINDOW * (page + 1)).enumerate() {
-    //                 if let Ok(item) = client.item(*id) {
-    //                     let mut data = data_top.lock().unwrap();
-    //                     data.top.insert(idx, item);
-    //                 }
-    //             }
-    //             let mut data = data_top.lock().unwrap();
-    //             data.top_ids = ids;
-    //             // data.top_page = (data.top_page + 1) % 4;
-    //         }
-    //         println!("Fetched top");
-    //     });
-    // }
-
-    // fn fetch_new(&self) {
-    //     let data_new = Arc::clone(&self.data);
-
-    //     thread::spawn(move || {
-    //         let client = JsonClient::new();
-    //         let ids = client.new_stories();
-    //         if let Ok(ids) = ids {
-    //             let page;
-    //             {
-    //                 let data = data_new.lock().unwrap();
-    //                 page = data.new_page;
-    //             }
-    //             for (idx, id) in ids.iter().take(WINDOW * (page + 1)).enumerate() {
-    //                 if let Ok(item) = client.item(*id) {
-    //                     let mut data = data_new.lock().unwrap();
-    //                     data.new.insert(idx, item);
-    //                 }
-    //             }
-    //             let mut data = data_new.lock().unwrap();
-    //             data.new_ids = ids;
-    //             // data.new_page = (data.new_page + 1) % 4;
-    //         }
-    //         println!("Fetched new");
-    //     });
-    // }
-
     fn init(&self) {
         let data_top = Arc::clone(&self.data);
         thread::spawn(move || loop {
@@ -273,63 +226,67 @@ impl YReader {
 
                 stories.iter().for_each(|(idx, s)| {
                     if let Some(title) = &s.title {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(egui::RichText::new(title).strong());
-                            if let Some(url) = &s.url {
-                                if let Ok(u) = Url::parse(url) {
-                                    ui.horizontal(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 0.0;
-                                        ui.label("(");
-                                        ui.hyperlink_to(
-                                            u.domain()
-                                                .and_then(|s| Some(s.to_string()))
-                                                .unwrap_or(url.clone()),
-                                            u.to_string(),
-                                        );
-                                        ui.label(")");
-                                    });
+                        if let Some(by) = &s.by {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(egui::RichText::new(title).strong());
+                                if let Some(url) = &s.url {
+                                    if let Ok(u) = Url::parse(url) {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 0.0;
+                                            ui.label("(");
+                                            ui.hyperlink_to(
+                                                u.domain()
+                                                    .and_then(|s| Some(s.to_string()))
+                                                    .unwrap_or(url.clone()),
+                                                u.to_string(),
+                                            );
+                                            ui.label(")");
+                                        });
+                                    }
                                 }
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 2.5;
-                            ui.label(format!("{} points", &s.score.unwrap_or(0)));
-                            if let Some(by) = &s.by {
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 2.5;
+                                ui.label(format!("{} points", &s.score.unwrap_or(0)));
                                 ui.add(egui::widgets::Separator::default().vertical());
-                                ui.hyperlink_to(
-                                    by,
-                                    format!("https://news.ycombinator.com/user?id={}", by),
-                                );
-                            }
+                                ui.hyperlink_to(by, format!("{}/user?id={}", BASE_URL, by));
 
-                            ui.add(egui::widgets::Separator::default().vertical());
+                                ui.add(egui::widgets::Separator::default().vertical());
 
-                            let now = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .expect("oops")
-                                .as_secs();
+                                let now = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .expect("oops")
+                                    .as_secs();
 
-                            ui.label(format!(
-                                "{}",
-                                HumanTime::from_seconds((s.time as i64) - (now as i64))
-                            ));
-                        });
+                                ui.label(format!(
+                                    "{}",
+                                    HumanTime::from_seconds((s.time as i64) - (now as i64))
+                                ));
 
-                        egui::containers::CollapsingHeader::new(format!(
-                            "{} Comments",
-                            &s.kids
+                                ui.hyperlink_to("↗", format!("{}/item?id={}", BASE_URL, s.id));
+                            });
+
+                            let kid_count = &s
+                                .kids
                                 .as_ref()
                                 .and_then(|k| Some(k.len()))
-                                .unwrap_or_default()
-                        ))
-                        .id_source(format!("{}-{}", idx, s.id))
-                        .show(ui, |ui| {
-                            if let Some(kids) = &s.kids {
-                                self.render_comments(ui, kids);
-                            }
-                        });
+                                .unwrap_or_default();
 
-                        ui.separator();
+                            egui::containers::CollapsingHeader::new(format!(
+                                "{} Comment{}",
+                                kid_count,
+                                if *kid_count != 1 { "s" } else { "" }
+                            ))
+                            .id_source(format!("{}-{}", idx, s.id))
+                            .show(ui, |ui| {
+                                if let Some(kids) = &s.kids {
+                                    self.render_comments(ui, kids, by);
+                                }
+                            });
+
+                            ui.separator();
+                        }
                     }
                 });
 
@@ -370,14 +327,14 @@ impl YReader {
             })
     }
 
-    fn render_comments(&self, ui: &mut egui::Ui, kids: &Vec<u32>) {
+    fn render_comments(&self, ui: &mut egui::Ui, kids: &Vec<u32>, op: &String) {
         let data = Arc::clone(&self.data);
         lazy_static! {
             static ref RE: Regex =
                 Regex::new(r#"<a\s+href=(?:"([^"]+)"|'([^']+)').*?>(.*?)</a>"#).unwrap();
         }
 
-        for k in kids {
+        for (i, k) in kids.iter().enumerate() {
             let comment: Option<CommentState>;
             {
                 let data = data.lock().unwrap();
@@ -392,10 +349,12 @@ impl YReader {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 2.5;
                         if let Some(by) = &c.by {
-                            ui.hyperlink_to(
-                                by,
-                                format!("https://news.ycombinator.com/user?id={}", by),
-                            );
+                            ui.spacing_mut().item_spacing.x = 4.;
+                            ui.hyperlink_to(by, format!("{}/user?id={}", BASE_URL, by));
+
+                            if by.eq(op) {
+                                ui.code("op");
+                            }
                         }
 
                         ui.add(egui::widgets::Separator::default().vertical());
@@ -409,6 +368,8 @@ impl YReader {
                             "{}",
                             HumanTime::from_seconds((c.time as i64) - (now as i64))
                         ));
+
+                        ui.hyperlink_to("↗", format!("{}/item?id={}", BASE_URL, c.id));
                     });
 
                     let text = c.text.to_owned().unwrap_or_default();
@@ -436,14 +397,26 @@ impl YReader {
                         });
                     });
 
+                    let is_last = i == kids.len() - 1;
                     if let Some(kids) = &c.kids {
-                        egui::containers::CollapsingHeader::new(format!("{} Replies", kids.len()))
-                            .id_source(c.id)
-                            .show(ui, |ui| {
-                                self.render_comments(ui, &kids);
-                            });
+                        ui.add_space(2.);
+                        let kid_count = kids.len();
+                        egui::containers::CollapsingHeader::new(format!(
+                            "{} Repl{}",
+                            kid_count,
+                            if kid_count == 1 { "y" } else { "ies" }
+                        ))
+                        .id_source(c.id)
+                        .show(ui, |ui| {
+                            self.render_comments(ui, &kids, op);
+                        });
                     }
-                    ui.separator();
+
+                    ui.add_space(2.);
+                    if !is_last {
+                        ui.separator();
+                        ui.add_space(2.);
+                    }
                 }
                 Some(CommentState::Errored) => {
                     ui.label("Errored.");
@@ -477,6 +450,58 @@ impl YReader {
             }
         }
     }
+
+    // fn fetch_top(&self) {
+    //     let data_top = Arc::clone(&self.data);
+
+    //     thread::spawn(move || {
+    //         let client = JsonClient::new();
+    //         let ids = client.top_stories();
+    //         if let Ok(ids) = ids {
+    //             let page;
+    //             {
+    //                 let data = data_top.lock().unwrap();
+    //                 page = data.top_page;
+    //             }
+    //             for (idx, id) in ids.iter().take(WINDOW * (page + 1)).enumerate() {
+    //                 if let Ok(item) = client.item(*id) {
+    //                     let mut data = data_top.lock().unwrap();
+    //                     data.top.insert(idx, item);
+    //                 }
+    //             }
+    //             let mut data = data_top.lock().unwrap();
+    //             data.top_ids = ids;
+    //             // data.top_page = (data.top_page + 1) % 4;
+    //         }
+    //         println!("Fetched top");
+    //     });
+    // }
+
+    // fn fetch_new(&self) {
+    //     let data_new = Arc::clone(&self.data);
+
+    //     thread::spawn(move || {
+    //         let client = JsonClient::new();
+    //         let ids = client.new_stories();
+    //         if let Ok(ids) = ids {
+    //             let page;
+    //             {
+    //                 let data = data_new.lock().unwrap();
+    //                 page = data.new_page;
+    //             }
+    //             for (idx, id) in ids.iter().take(WINDOW * (page + 1)).enumerate() {
+    //                 if let Ok(item) = client.item(*id) {
+    //                     let mut data = data_new.lock().unwrap();
+    //                     data.new.insert(idx, item);
+    //                 }
+    //             }
+    //             let mut data = data_new.lock().unwrap();
+    //             data.new_ids = ids;
+    //             // data.new_page = (data.new_page + 1) % 4;
+    //         }
+    //         println!("Fetched new");
+    //     });
+    // }
 }
 
 impl Default for YReader {
@@ -537,13 +562,14 @@ impl epi::App for YReader {
             lazy_static! {
                 static ref SELECTION_STYLE: egui::style::Selection = egui::style::Selection {
                     bg_fill: egui::Color32::from_rgb(215, 101, 46),
-                    stroke: Stroke {
+                    stroke: egui::Stroke {
                         width: 1.,
                         color: egui::Color32::WHITE,
                     },
                 };
             }
             ui.visuals_mut().selection = *SELECTION_STYLE;
+            ui.spacing_mut().item_spacing.y = 4.;
 
             ui.horizontal_wrapped(|ui| {
                 ui.heading("Y Reader");
@@ -579,7 +605,7 @@ impl epi::App for YReader {
                             }
                             ui.hyperlink_to(
                                 username.as_str(),
-                                format!("https://news.ycombinator.com/user?id={}", username),
+                                format!("{}/user?id={}", BASE_URL, username),
                             );
                         }
                     }
