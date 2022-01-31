@@ -278,6 +278,7 @@ impl YReader {
                                 kid_count,
                                 if *kid_count != 1 { "s" } else { "" }
                             ))
+                            .enabled(*kid_count > 0)
                             .id_source(format!("{}-{}", idx, s.id))
                             .show(ui, |ui| {
                                 if let Some(kids) = &s.kids {
@@ -406,6 +407,7 @@ impl YReader {
                             kid_count,
                             if kid_count == 1 { "y" } else { "ies" }
                         ))
+                        .enabled(kid_count > 0)
                         .id_source(c.id)
                         .show(ui, |ui| {
                             self.render_comments(ui, &kids, op);
